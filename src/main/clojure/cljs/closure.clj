@@ -54,7 +54,7 @@
               Result JSError CheckLevel DiagnosticGroups
               CommandLineRunner AnonymousFunctionNamingPolicy
               JSModule JSModuleGraph SourceMap ProcessCommonJSModules
-              ES6ModuleLoader AbstractCompiler TransformAMDToCJSModule
+              ES6ModuleLoader JavascriptModuleLoaderHelpers IJavascriptModuleLoader AbstractCompiler TransformAMDToCJSModule
               ProcessEs6Modules CompilerInput]
            [com.google.javascript.rhino Node]
            [java.security MessageDigest]
@@ -77,7 +77,7 @@
    (into-array java.lang.Class
                [java.util.List java.lang.Iterable]))
  (do (def is-new-es6-loader? true)
-     (def default-module-root ES6ModuleLoader/DEFAULT_FILENAME_PREFIX))
+     (def default-module-root JavascriptModuleLoaderHelpers/DEFAULT_FILENAME_PREFIX))
  (def is-new-es6-loader? false))
 
 (util/compile-if
@@ -90,7 +90,7 @@
 (util/compile-if
  (and (.getConstructor ProcessCommonJSModules
         (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader]))
+                    [com.google.javascript.jscomp.Compiler IJavascriptModuleLoader]))
       (or is-new-es6-loader? is-old-es6-loader?))
  (def can-convert-commonjs? true)
  (def can-convert-commonjs? false))
@@ -106,7 +106,7 @@
 (util/compile-if
  (and (.getConstructor ProcessEs6Modules
         (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader Boolean/TYPE]))
+                    [com.google.javascript.jscomp.Compiler IJavascriptModuleLoader Boolean/TYPE]))
       (or is-new-es6-loader? is-old-es6-loader?))
  (def can-convert-es6? true)
  (def can-convert-es6? false))
@@ -281,7 +281,7 @@
                   (map #(js-source-file (.getFile %) (slurp %)) ext))]
     (let [js-sources (-> externs filter-js add-target load-js)
           ups-sources (-> ups-externs filter-cp-js load-js)
-          all-sources (concat js-sources ups-sources)] 
+          all-sources (concat js-sources ups-sources)]
       (if use-only-custom-externs
         all-sources
         (into all-sources (CommandLineRunner/getDefaultExterns))))))
@@ -310,7 +310,7 @@
   (-source-map [this] "Return the CLJS compiler generated JS source mapping"))
 
 (extend-protocol deps/IJavaScript
-  
+
   String
   (-foreign? [this] false)
   (-closure-lib? [this] false)
@@ -318,7 +318,7 @@
   (-provides [this] (:provides (deps/parse-js-ns (string/split-lines this))))
   (-requires [this] (:requires (deps/parse-js-ns (string/split-lines this))))
   (-source [this] this)
-  
+
   clojure.lang.IPersistentMap
   (-foreign? [this] (:foreign this))
   (-closure-lib? [this] (:closure-lib this))
@@ -491,14 +491,14 @@
     (case (.getProtocol this)
       "file" (-compile (io/file this) opts)
       "jar" (compile-from-jar this opts)))
-  
+
   clojure.lang.PersistentList
   (-compile [this opts]
     (compile-form-seq [this]))
-  
+
   String
   (-compile [this opts] (-compile (io/file this) opts))
-  
+
   clojure.lang.PersistentVector
   (-compile [this opts] (compile-form-seq this))
   )
@@ -1040,7 +1040,7 @@
 
   ;; optimize a ClojureScript form
   (optimize {:optimizations :simple} (-compile '(def x 3) {}))
-  
+
   ;; optimize a project
   (println (->> (-compile "samples/hello/src" {})
                 (apply add-dependencies {})
@@ -1431,7 +1431,7 @@
       (output-deps-file opts disk-sources))))
 
 (comment
-  
+
   ;; output unoptimized alone
   (output-unoptimized {} "goog.provide('test');\ngoog.require('cljs.core');\nalert('hello');\n")
   ;; output unoptimized with all dependencies
@@ -1448,7 +1448,7 @@
   )
 
 
-(defn get-upstream-deps* 
+(defn get-upstream-deps*
   "returns a merged map containing all upstream dependencies defined
   by libraries on the classpath."
   ([]

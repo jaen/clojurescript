@@ -27,10 +27,17 @@
             <artifactId>clojure</artifactId>
             <version>1.7.0</version>
         </dependency>
+        <!--dependency>
+            <groupId>com.google.javascript</groupId>
+            <artifactId>closure-compiler</artifactId>
+            <version>v20150901</version>
+        </dependency-->
         <dependency>
             <groupId>com.google.javascript</groupId>
             <artifactId>closure-compiler</artifactId>
             <version>v20150901</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../closure-compiler/build/compiler.jar</systemPath>
         </dependency>
         <dependency>
             <groupId>org.clojure</groupId>
