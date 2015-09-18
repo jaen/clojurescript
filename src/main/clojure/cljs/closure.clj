@@ -42,7 +42,8 @@
             [cljs.js-deps :as deps]
             [clojure.java.io :as io]
             [clojure.string :as string]
-            [clojure.data.json :as json])
+            [clojure.data.json :as json]
+            [cljs.preprocess :as preprocess])
   (:import [java.io File BufferedInputStream StringWriter]
            [java.net URL]
            [java.util.logging Level]
@@ -54,8 +55,8 @@
               Result JSError CheckLevel DiagnosticGroups
               CommandLineRunner AnonymousFunctionNamingPolicy
               JSModule JSModuleGraph SourceMap ProcessCommonJSModules
-              ES6ModuleLoader AbstractCompiler TransformAMDToCJSModule
-              ProcessEs6Modules CompilerInput]
+              ES6ModuleLoader JavascriptModuleLoaderHelpers IJavascriptModuleLoader
+              AbstractCompiler TransformAMDToCJSModule ProcessEs6Modules CompilerInput]
            [com.google.javascript.rhino Node]
            [java.security MessageDigest]
            [javax.xml.bind DatatypeConverter]
@@ -77,7 +78,7 @@
    (into-array java.lang.Class
                [java.util.List java.lang.Iterable]))
  (do (def is-new-es6-loader? true)
-     (def default-module-root ES6ModuleLoader/DEFAULT_FILENAME_PREFIX))
+     (def default-module-root JavascriptModuleLoaderHelpers/DEFAULT_FILENAME_PREFIX))
  (def is-new-es6-loader? false))
 
 (util/compile-if
@@ -90,7 +91,7 @@
 (util/compile-if
  (and (.getConstructor ProcessCommonJSModules
         (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader]))
+                    [com.google.javascript.jscomp.Compiler IJavascriptModuleLoader]))
       (or is-new-es6-loader? is-old-es6-loader?))
  (def can-convert-commonjs? true)
  (def can-convert-commonjs? false))
@@ -106,7 +107,7 @@
 (util/compile-if
  (and (.getConstructor ProcessEs6Modules
         (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader Boolean/TYPE]))
+                    [com.google.javascript.jscomp.Compiler IJavascriptModuleLoader Boolean/TYPE]))
       (or is-new-es6-loader? is-old-es6-loader?))
  (def can-convert-es6? true)
  (def can-convert-es6? false))
@@ -281,7 +282,7 @@
                   (map #(js-source-file (.getFile %) (slurp %)) ext))]
     (let [js-sources (-> externs filter-js add-target load-js)
           ups-sources (-> ups-externs filter-cp-js load-js)
-          all-sources (concat js-sources ups-sources)] 
+          all-sources (concat js-sources ups-sources)]
       (if use-only-custom-externs
         all-sources
         (into all-sources (CommandLineRunner/getDefaultExterns))))))
@@ -310,18 +311,20 @@
   (-source-map [this] "Return the CLJS compiler generated JS source mapping"))
 
 (extend-protocol deps/IJavaScript
-  
+
   String
   (-foreign? [this] false)
   (-closure-lib? [this] false)
+  (-modular-lib? [this] false)
   (-url [this] nil)
   (-provides [this] (:provides (deps/parse-js-ns (string/split-lines this))))
   (-requires [this] (:requires (deps/parse-js-ns (string/split-lines this))))
   (-source [this] this)
-  
+
   clojure.lang.IPersistentMap
   (-foreign? [this] (:foreign this))
   (-closure-lib? [this] (:closure-lib this))
+  (-modular-lib? [this] (boolean (:module-type this)))
   (-url [this] (or (:url this)
                    (deps/to-url (:file this))))
   (-provides [this] (map name (:provides this)))
@@ -334,6 +337,7 @@
   deps/IJavaScript
   (-foreign? [this] foreign)
   (-closure-lib? [this] (:closure-lib this))
+  (-modular-lib? [this] (boolean (:module-type this)))
   (-url [this] url)
   (-provides [this] provides)
   (-requires [this] requires)
@@ -491,14 +495,14 @@
     (case (.getProtocol this)
       "file" (-compile (io/file this) opts)
       "jar" (compile-from-jar this opts)))
-  
+
   clojure.lang.PersistentList
   (-compile [this opts]
     (compile-form-seq [this]))
-  
+
   String
   (-compile [this opts] (-compile (io/file this) opts))
-  
+
   clojure.lang.PersistentVector
   (-compile [this opts] (compile-form-seq this))
   )
@@ -1040,7 +1044,7 @@
 
   ;; optimize a ClojureScript form
   (optimize {:optimizations :simple} (-compile '(def x 3) {}))
-  
+
   ;; optimize a project
   (println (->> (-compile "samples/hello/src" {})
                 (apply add-dependencies {})
@@ -1210,6 +1214,34 @@
     (str (string/replace (first provides) "." File/separator) ".js")
     (if (.endsWith lib-path ".js")
       (util/get-name url)
+      (let [path (util/path url)
+            file-url-as-uri (.toURI url)
+            output-dir-as-uri (.toURI (io/file (util/output-directory (get-in @env/*compiler* [:options]))))]
+        (if-not (.isAbsolute file-url-as-uri)
+          (string/replace
+            path
+            (str (io/file (System/getProperty "user.dir") lib-path) File/separator)
+            "")
+          (.toString (.relativize output-dir-as-uri file-url-as-uri)))))))
+
+(defn join-path [path-elements]
+  (string/join File/separator path-elements))
+
+(defn lib-rel-path' [{:keys [url provides lib-spec] :as ijs} opts]
+  (let [path (util/path url)
+        lib-name (:name lib-spec)
+        lib-path (:path lib-spec)
+        lib-path-parent (io/file (System/getProperty "user.dir") lib-path)
+        lib-relative-part (string/replace
+                        path
+                        (str lib-path-parent File/separator)
+                        "")
+        ]
+     (join-path ["module" lib-name lib-relative-part])) ; HACK: remove when custom odule loader is added
+  #_(if (nil? lib-path)
+    (str (string/replace (first provides) "." File/separator) ".js")
+    (if (.endsWith lib-path ".js")
+      (util/get-name url)
       (let [path (util/path url)]
         (string/replace
           path
@@ -1227,6 +1259,7 @@
        url
        (cond
          (deps/-closure-lib? js) (lib-rel-path js)
+         (deps/-modular-lib? js) (lib-rel-path' js opts)
          (deps/-foreign? js) (util/get-name url)
          :else (path-from-jarfile url))
 
@@ -1250,7 +1283,7 @@
       (not (.endsWith path File/separator)) (#(str % File/separator)))))
 
 (util/compile-if is-new-es6-loader?
-  (defn make-es6-loader [source-files]
+  (defn make-es6-loader [source-files libs]
     (let [^List module-roots (list default-module-root)
           ^List compiler-inputs (map #(CompilerInput. %) source-files)]
       (ES6ModuleLoader. module-roots compiler-inputs)))
@@ -1265,11 +1298,26 @@
     (.getAstRoot input closure-compiler)))
 
 (defn get-source-files [module-type opts]
-  (->> (:foreign-libs opts)
+  (->> (:libs opts)
        (filter #(= (:module-type %) module-type))
        (map (fn [lib]
               (let [lib (deps/load-foreign-library lib)]
                 (js-source-file (:file lib) (deps/-source lib)))))))
+
+(defn wrap-with-spec [{:keys [path files main name module-type] :as lib} url]
+  (let [file-path (util/path url)
+        file-hack (str path File/separator
+                         (string/replace
+                           file-path
+                           (str (io/file (System/getProperty "user.dir") path) File/separator)
+                           ""))]
+    {:url url
+     :file file-hack
+     ; :closure-lib true
+     :module-type module-type}))
+
+(defn get-all-lib-files [{:keys [path files main name module-type] :as lib}]
+  (mapcat #(map (partial wrap-with-spec lib) (deps/find-js-resources (join-path [path %]))) files))
 
 (defmulti convert-js-module
   "Takes a JavaScript module as an IJavaScript and rewrites it into a Google
@@ -1290,16 +1338,17 @@
 
 (util/compile-if can-convert-commonjs?
   (defmethod convert-js-module :commonjs [ijs opts]
-    (let [{:keys [file module-type]} ijs
+    (let [{:keys [file module-type lib-spec]} ijs
+          libs (:libs opts)
           ^List externs '()
-          ^List source-files (get-source-files module-type opts)
+          ^List source-files (map #(js-source-file (:file %) (deps/-source %))
+                                  (mapcat get-all-lib-files (filter map? libs))) #_(get-source-files module-type opts)
           ^CompilerOptions options (make-convert-js-module-options opts)
           closure-compiler (doto (make-closure-compiler)
                              (.init externs source-files options))
-          es6-loader (if is-new-es6-loader?
-                       (make-es6-loader source-files)
-                       (make-es6-loader closure-compiler file))
-          cjs (ProcessCommonJSModules. closure-compiler es6-loader)
+          cjs-loader (if is-new-es6-loader?
+                       (preprocess/make-cjs-loader lib-spec source-files libs))
+          cjs (ProcessCommonJSModules. closure-compiler cjs-loader)
           ^Node root (get-root-node ijs closure-compiler)]
       (util/compile-if can-convert-amd?
         (when (= module-type :amd)
@@ -1431,7 +1480,7 @@
       (output-deps-file opts disk-sources))))
 
 (comment
-  
+
   ;; output unoptimized alone
   (output-unoptimized {} "goog.provide('test');\ngoog.require('cljs.core');\nalert('hello');\n")
   ;; output unoptimized with all dependencies
@@ -1448,7 +1497,7 @@
   )
 
 
-(defn get-upstream-deps* 
+(defn get-upstream-deps*
   "returns a merged map containing all upstream dependencies defined
   by libraries on the classpath."
   ([]
@@ -1606,7 +1655,7 @@
         (not (false? (:static-fns opts))) (assoc :static-fns true)
         (not (false? (:optimize-constants opts))) (assoc :optimize-constants true)))))
 
-(defn process-js-modules
+#_(defn process-js-modules
   "Given the current compiler options, converts JavaScript modules to Google
   Closure modules and writes them to disk. Adds mapping from original module
   namespace to new module namespace to compiler env. Returns modified compiler
@@ -1627,6 +1676,41 @@
                       (update-in [:foreign-libs]
                         (comp vec (fn [libs] (remove #(= (:file %) file) libs))))))
                 new-opts))
+            opts js-modules)))
+
+(defn can-convert? [{:keys [module-type]}]
+  (or (and (= module-type :commonjs) can-convert-commonjs?)
+      (and (= module-type :amd) can-convert-amd?)
+      (and (= module-type :es6) can-convert-es6?)))
+
+;; needs :lib-path when closurefied
+(defn process-js-modules
+  "Given the current compiler options, converts JavaScript modules to Google
+  Closure modules and writes them to disk. Adds mapping from original module
+  namespace to new module namespace to compiler env. Returns modified compiler
+  options where new modules are passed with :libs option."
+  [opts]
+  (let [js-modules (filter map? (:libs opts))]
+    (reduce (fn [opts-acc {:keys [path files main name module-type] :as lib}]
+              ;; proces single library
+              (let [files (get-all-lib-files lib)
+                    out-files (for [file files]
+                                (let [ijs (write-javascript opts (assoc file :lib-spec lib))
+                                      provides (-> (deps/load-library (:out-file ijs)) first :provides)
+                                      module-name (first provides)]
+                                  #_(doseq [provide provides #_(:provides ijs)]
+                                    (swap! env/*compiler*
+                                           #(update-in % [:js-module-index] assoc provide module-name)))
+                                  (:out-file ijs)))
+                    _ (doall out-files)
+                    compiler-output-dir (util/output-directory opts)
+                    lib-out-path (join-path [compiler-output-dir "module"])]
+                (-> opts-acc
+                    (update-in [:libs] (comp vec (fn [libs]
+                                                   (conj (remove #(= lib %) libs) lib-out-path)
+                                                   #_(conj (remove #(= lib %) libs) lib-out-path)))))
+
+                ))
             opts js-modules)))
 
 (defn build

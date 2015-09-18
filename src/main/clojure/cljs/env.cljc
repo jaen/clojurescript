@@ -44,7 +44,7 @@ state that is accessed/maintained by many different components."}
      (atom (merge {:cljs.analyzer/namespaces {'cljs.user {:name 'cljs.user}}
                    :cljs.analyzer/constant-table {}
                    :options options}
-             #?(:clj {:js-dependency-index (js-dependency-index options)})))))
+             #?(:clj {:js-dependency-index (js-dependency-index (update-in options [:libs] (constantly [])))})))))
 
 #?(:clj
    (defmacro with-compiler-env

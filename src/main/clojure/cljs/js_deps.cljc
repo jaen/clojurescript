@@ -33,14 +33,25 @@ If no ClassLoader is provided, RT/baseLoader is assumed."
 
 (def jar-entry-names (memoize jar-entry-names*))
 
+(defn find-files-jar
+  ([jar-path lib-path]
+   (find-files-jar jar-path lib-path nil))
+  ;"Returns a seq of URLs of all JavaScript resources in the given jar"
+  ([jar-path lib-path predicate]
+    (let [filter-fn (if predicate
+                      #(and
+                        (predicate %)
+                        (.startsWith ^String % lib-path))
+                      #(and
+                        (.startsWith ^String % lib-path)))]
+      (map io/resource
+        (filter filter-fn
+          (jar-entry-names jar-path))))))
+
 (defn find-js-jar
   "Returns a seq of URLs of all JavaScript resources in the given jar"
   [jar-path lib-path]
-  (map io/resource
-    (filter #(and
-               (.endsWith ^String % ".js")
-               (.startsWith ^String % lib-path))
-      (jar-entry-names jar-path))))
+  (find-files-jar jar-path lib-path #(.endsWith ^String % ".js")))
 
 (defmulti to-url class)
 
@@ -50,43 +61,69 @@ If no ClassLoader is provided, RT/baseLoader is assumed."
 
 (defmethod to-url String [s] (to-url (io/file s)))
 
+(defn find-files-fs
+  ([path]
+    (find-files-fs path nil))
+  ([path predicate]
+    (let [file (io/file path)
+          filter-fn (if predicate
+                      #(and (.isFile ^File %)
+                            (predicate (.getName ^File %)))
+                      #(.isFile ^File %))]
+      (when (.exists file)
+        (map to-url
+             (filter filter-fn
+                     (file-seq file)))))))
+
 (defn find-js-fs
-  "finds js resources from a path on the files system"
+  ;"finds js resources from a path on the files system"
   [path]
-  (let [file (io/file path)]
-    (when (.exists file)
-      (map to-url (filter #(.endsWith ^String (.getName ^File %) ".js") (file-seq (io/file path)))))))
+  (find-files-fs path #(.endsWith % ".js")))
+
+(defn find-files-classpath
+  ([path] (find-files-classpath path nil))
+  ;"Returns a seq of URLs of all JavaScript files on the classpath."
+  ([path predicate]
+  (->> (all-classpath-urls)
+       (map io/file)
+       (reduce
+         (fn [files jar-or-dir]
+           (let [name (.toLowerCase (.getName ^File jar-or-dir))
+                 ext  (.substring name (inc (.lastIndexOf name ".")))]
+             (->> (when (.exists ^File jar-or-dir)
+                    (cond
+                      (.isDirectory ^File jar-or-dir)
+                      (find-files-fs (str (.getAbsolutePath ^File jar-or-dir) "/" path) predicate)
+
+                      (#{"jar" "zip"} ext)
+                      (find-files-jar jar-or-dir path predicate)
+
+                      :else nil))
+                  (remove nil?)
+                  (into files))))
+         []))))
 
 (defn find-js-classpath 
   "Returns a seq of URLs of all JavaScript files on the classpath."
   [path]
-  (->> (all-classpath-urls)
-    (map io/file)
-    (reduce
-      (fn [files jar-or-dir]
-        (let [name (.toLowerCase (.getName ^File jar-or-dir))
-              ext  (.substring name (inc (.lastIndexOf name ".")))]
-          (->> (when (.exists ^File jar-or-dir)
-                 (cond
-                   (.isDirectory ^File jar-or-dir)
-                   (find-js-fs (str (.getAbsolutePath ^File jar-or-dir) "/" path))
+  (find-files-classpath path #(.endsWith % ".js")))
 
-                   (#{"jar" "zip"} ext)
-                   (find-js-jar jar-or-dir path)
-
-                   :else nil))
-            (remove nil?)
-            (into files))))
-      [])))
+(defn find-resources
+  ([path] (find-resources path nil))
+  ([path predicate]
+;  "Returns a seq of URLs to all JavaScript resources on the classpath or within
+;a given (directory) path on the filesystem. [path] only applies to the latter
+;case."
+    (let [file (io/file path)]
+      (if (.exists file)
+        (find-files-fs path predicate)
+        (find-files-classpath path predicate)))))
 
 (defn find-js-resources [path]
   "Returns a seq of URLs to all JavaScript resources on the classpath or within
 a given (directory) path on the filesystem. [path] only applies to the latter
 case."
-  (let [file (io/file path)]
-    (if (.exists file)
-      (find-js-fs path)
-      (find-js-classpath path))))
+  (find-resources path #(.endsWith % ".js")))
 
 (defn parse-js-ns
   "Given the lines from a JavaScript source file, parse the provide
@@ -113,6 +150,8 @@ case."
   library (a js file that not have any goog.provide statement")
   (-closure-lib? [this] "Whether the Javascript represents a Closure style
   library")
+  (-modular-lib? [this] "Whether the Javascript represents a JS modular style
+  library (a library that uses either CommonJS, AMD, UMD or ES6 style modules")
   (-url [this] "The URL where this JavaScript is located. Returns nil
   when JavaScript exists in memory only.")
   (-provides [this] "A list of namespaces that this JavaScript provides.")
@@ -204,7 +243,7 @@ case."
 
 (def load-foreign-library (memoize load-foreign-library*))
 
-(defn- library-graph-node
+(defn library-graph-node
   "Returns a map of :provides, :requires, and :url given a URL to a goog-style
 JavaScript library containing provide/require 'declarations'."
   ([url] (library-graph-node url nil))
@@ -216,14 +255,32 @@ JavaScript library containing provide/require 'declarations'."
          (when lib-path
            {:closure-lib true :lib-path lib-path}))))))
 
-(defn load-library*
-  "Given a path to a JavaScript library, which is a directory
-  containing Javascript files, return a list of maps
-  containing :provides, :requires, :file and :url."
-  [path]
+;(defn load-library*
+;  "Given a path to a JavaScript library, which is a directory
+;  containing Javascript files, return a list of maps
+;  containing :provides, :requires, :file and :url."
+;  [path]
+;  (let [a (find-js-resources path)
+;        b (map #(library-graph-node % path) a)
+;        c (filter #(seq (:provides %)) b)]
+;    c)
+;  #_(->> (find-js-resources path)
+;    (map #(library-graph-node % path))
+;    (filter #(seq (:provides %)))))
+
+(defmulti load-library*
+          (fn [spec]
+            (cond
+              (string? spec) :path
+              (map? spec)    :spec)))
+
+(defmethod load-library* :path [path]
   (->> (find-js-resources path)
     (map #(library-graph-node % path))
     (filter #(seq (:provides %)))))
+
+(defmethod load-library* :spec [{:keys [root]}]
+  (let [files (find-js-resources root)]))
 
 (def load-library (memoize load-library*))
 
