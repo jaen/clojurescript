@@ -42,20 +42,21 @@
             [cljs.js-deps :as deps]
             [clojure.java.io :as io]
             [clojure.string :as string]
-            [clojure.data.json :as json])
+            [clojure.data.json :as json]
+            #_[cljs.preprocess :as preprocess])
   (:import [java.io File BufferedInputStream StringWriter]
            [java.net URL]
            [java.util.logging Level]
            [java.util List Random]
            [java.util.concurrent TimeUnit]
            [com.google.javascript.jscomp CompilerOptions CompilationLevel
-              CompilerOptions$LanguageMode SourceMap$Format
-              SourceMap$DetailLevel ClosureCodingConvention SourceFile
-              Result JSError CheckLevel DiagnosticGroups
-              CommandLineRunner AnonymousFunctionNamingPolicy
-              JSModule JSModuleGraph SourceMap ProcessCommonJSModules
-              ES6ModuleLoader AbstractCompiler TransformAMDToCJSModule
-              ProcessEs6Modules CompilerInput]
+                                         CompilerOptions$LanguageMode SourceMap$Format
+                                         SourceMap$DetailLevel ClosureCodingConvention SourceFile
+                                         Result JSError CheckLevel DiagnosticGroups
+                                         CommandLineRunner AnonymousFunctionNamingPolicy
+                                         JSModule JSModuleGraph SourceMap ProcessCommonJSModules
+                                         ES6ModuleLoader AbstractCompiler TransformAMDToCJSModule
+                                         ProcessEs6Modules CompilerInput JavascriptModuleLoaderHelpers IJavascriptModuleLoader]
            [com.google.javascript.rhino Node]
            [java.security MessageDigest]
            [javax.xml.bind DatatypeConverter]
@@ -77,7 +78,7 @@
    (into-array java.lang.Class
                [java.util.List java.lang.Iterable]))
  (do (def is-new-es6-loader? true)
-     (def default-module-root ES6ModuleLoader/DEFAULT_FILENAME_PREFIX))
+     (def default-module-root JavascriptModuleLoaderHelpers/DEFAULT_FILENAME_PREFIX))
  (def is-new-es6-loader? false))
 
 (util/compile-if
@@ -90,7 +91,7 @@
 (util/compile-if
  (and (.getConstructor ProcessCommonJSModules
         (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader]))
+                    [com.google.javascript.jscomp.Compiler IJavascriptModuleLoader]))
       (or is-new-es6-loader? is-old-es6-loader?))
  (def can-convert-commonjs? true)
  (def can-convert-commonjs? false))
@@ -106,7 +107,7 @@
 (util/compile-if
  (and (.getConstructor ProcessEs6Modules
         (into-array java.lang.Class
-                    [com.google.javascript.jscomp.Compiler ES6ModuleLoader Boolean/TYPE]))
+                    [com.google.javascript.jscomp.Compiler IJavascriptModuleLoader Boolean/TYPE]))
       (or is-new-es6-loader? is-old-es6-loader?))
  (def can-convert-es6? true)
  (def can-convert-es6? false))
@@ -314,6 +315,7 @@
   String
   (-foreign? [this] false)
   (-closure-lib? [this] false)
+  (-modular-lib? [this] false)
   (-url [this] nil)
   (-provides [this] (:provides (deps/parse-js-ns (string/split-lines this))))
   (-requires [this] (:requires (deps/parse-js-ns (string/split-lines this))))
@@ -322,6 +324,7 @@
   clojure.lang.IPersistentMap
   (-foreign? [this] (:foreign this))
   (-closure-lib? [this] (:closure-lib this))
+  (-modular-lib? [this] (:modular-lib this))
   (-url [this] (or (:url this)
                    (deps/to-url (:file this))))
   (-provides [this] (map name (:provides this)))
@@ -334,6 +337,7 @@
   deps/IJavaScript
   (-foreign? [this] foreign)
   (-closure-lib? [this] (:closure-lib this))
+  (-modular-lib? [this] (:modular-lib this))
   (-url [this] url)
   (-provides [this] provides)
   (-requires [this] requires)
@@ -535,7 +539,7 @@
     (if (seq requires)
       (let [node (or (get (@env/*compiler* :js-dependency-index) (first requires))
                      (deps/find-classpath-lib (first requires)))
-            new-req (remove #(contains? visited %) (:requires node))]
+            new-req (remove #(contains? visited %) (:requires node) #_(deps/-requires node))]
         (recur (into (rest requires) new-req)
                (into visited new-req)
                (conj deps node)))
@@ -657,19 +661,26 @@
     (cons
       (javascript-file nil (io/resource "goog/base.js") ["goog"] nil)
       (deps/dependency-order
+        ;(filter some?
         (concat
           (map
-            (fn [{:keys [foreign url file provides requires] :as js-map}]
-              (let [url (or url (io/resource file))]
-                (merge
-                  (javascript-file foreign url provides requires)
-                  js-map)))
-            required-js)
+            (fn [{:keys [foreign url file provides requires] :as ijs}]
+              (cond
+                (record? ijs)
+                  ijs
+                (map? ijs)
+                  (let [url (or url (io/resource file))]
+                    (merge
+                      (javascript-file foreign url provides requires)
+                      ijs))
+                :else
+                  ijs))
+              required-js)
           [(when (-> @env/*compiler* :options :emit-constants)
              (let [url (deps/to-url (str (util/output-directory opts) "/constants_table.js"))]
                (javascript-file nil url url ["constants-table"] ["cljs.core"] nil nil)))]
           required-cljs
-          inputs)))))
+          inputs)))));)
 
 (defn preamble-from-paths [paths]
   (when-let [missing (seq (remove io/resource paths))]
@@ -1211,11 +1222,39 @@
     (str (string/replace (first provides) "." File/separator) ".js")
     (if (.endsWith lib-path ".js")
       (util/get-name url)
-      (let [path (util/path url)]
-        (string/replace
-          path
-          (str (io/file (System/getProperty "user.dir") lib-path) File/separator)
-          "")))))
+      (let [path (util/path url)
+            file-url-as-uri (.toURI url)
+            output-dir-as-uri (.toURI (io/file (util/output-directory (get-in @env/*compiler* [:options]))))]
+        (if-not (.isAbsolute file-url-as-uri)
+          (string/replace
+            path
+            (str (io/file (System/getProperty "user.dir") lib-path) File/separator)
+            "")
+          (.toString (.relativize output-dir-as-uri file-url-as-uri)))))))
+
+(defn join-path [path-elements]
+  (string/join File/separator path-elements))
+
+(defn lib-rel-path' [{:keys [url provides lib-spec] :as ijs} opts]
+  (let [path (util/path url)
+        lib-name (:name lib-spec)
+        lib-root (:root lib-spec)
+        lib-path-parent (io/file (System/getProperty "user.dir") lib-root)
+        lib-relative-part (string/replace
+                            path
+                            (str lib-path-parent File/separator)
+                            "")
+        ]
+    (join-path ["module" lib-name lib-relative-part])) ; HACK: remove when custom module loader is added
+  #_(if (nil? lib-path)
+      (str (string/replace (first provides) "." File/separator) ".js")
+      (if (.endsWith lib-path ".js")
+        (util/get-name url)
+        (let [path (util/path url)]
+          (string/replace
+            path
+            (str (io/file (System/getProperty "user.dir") lib-path) File/separator)
+            "")))))
 
 (defn ^String rel-output-path
   "Given an IJavaScript which is either in memory, in a jar file,
@@ -1227,6 +1266,7 @@
      (cond
        url
        (cond
+         (deps/-modular-lib? js) (lib-rel-path' js opts)
          (deps/-closure-lib? js) (lib-rel-path js)
          (deps/-foreign? js) (util/get-name url)
          :else (path-from-jarfile url))
@@ -1619,7 +1659,7 @@
                       (and (= module-type :amd) can-convert-amd?)
                       (and (= module-type :es6) can-convert-es6?))
                 (let [ijs (write-javascript opts (deps/load-foreign-library lib))
-                      module-name (-> (deps/load-library (:out-file ijs)) first :provides first)]
+                      module-name (-> (deps/load-library (:out-file ijs) {}) first :provides first)]
                   (doseq [provide (:provides ijs)]
                     (swap! env/*compiler*
                       #(update-in % [:js-module-index] assoc provide module-name)))
