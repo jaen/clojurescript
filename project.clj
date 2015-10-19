@@ -1,4 +1,4 @@
-(defproject org.clojure/clojurescript "0.0-SNAPSHOT"
+(defproject org.clojars.jaen/clojurescript "0.0-SNAPSHOT"
   :description "ClojureScript compiler and core runtime library"
   :parent [org.clojure/pom.contrib "0.1.2"]
   :url "https://github.com/clojure/clojurescript"
@@ -12,7 +12,7 @@
                  [org.clojure/data.json "0.2.6"]
                  [org.clojure/tools.reader "0.10.0-alpha3"]
                  [org.clojure/google-closure-library "0.0-20150805-acd8b553"]
-                 [com.google.javascript/closure-compiler "v20150920"]
+                 [org.clojars.jaen/closure-compiler "1.0-SNAPSHOT"]
                  [org.mozilla/rhino "1.7R5"]]
   :profiles {:1.6 {:dependencies [[org.clojure/clojure "1.6.0"]]}
              :uberjar {:aot :all :main clojure.main}}
